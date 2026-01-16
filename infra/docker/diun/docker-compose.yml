@@ -1,0 +1,20 @@
+services:
+  diun:
+    image: crazymax/diun:latest
+    container_name: diun
+    command: serve
+    restart: unless-stopped
+
+    volumes:
+      - diun-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+    environment:
+      TZ: Europe/Berlin
+      DIUN_PROVIDERS_DOCKER: "true"
+      DIUN_PROVIDERS_DOCKER_WATCHBYDEFAULT: "false"
+      DIUN_WATCH_SCHEDULE: "0 */6 * * *"
+      DIUN_NOTIF_LOG: "true"
+
+volumes:
+  diun-data:
