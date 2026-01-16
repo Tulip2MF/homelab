@@ -1,0 +1,32 @@
+  paperless:
+    image: ghcr.io/paperless-ngx/paperless-ngx:latest
+    container_name: paperless
+    restart: unless-stopped
+    depends_on:
+      - db
+      - redis
+
+    user: "2001:3000"
+
+    ports:
+      - "8000:8000"
+
+    environment:
+      PAPERLESS_REDIS: redis://redis:6379
+      PAPERLESS_DBHOST: db
+      PAPERLESS_DBNAME: ${DB_NAME}
+      PAPERLESS_DBUSER: ${DB_USER}
+      PAPERLESS_DBPASS: ${DB_PASSWORD}
+      PAPERLESS_TIME_ZONE: ${PAPERLESS_TIME_ZONE}
+      PAPERLESS_SECRET_KEY: ${PAPERLESS_SECRET_KEY}
+      PAPERLESS_URL: ${PAPERLESS_URL}
+      PAPERLESS_CONSUMER_POLLING: "30"
+
+    volumes:
+      - /mnt/appdata/paperless/data:/usr/src/paperless/data
+      - /mnt/appdata/paperless/media:/usr/src/paperless/media
+      - /mnt/appdata/paperless/export:/usr/src/paperless/export
+      - /mnt/appdata/paperless/consume:/usr/src/paperless/consume
+
+    labels:
+      - "diun.enable=true"
