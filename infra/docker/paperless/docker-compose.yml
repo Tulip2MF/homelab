@@ -37,7 +37,7 @@ services:
     user: "2001:3000"
 
     ports:
-      - "8000:8000"
+      - "8010:8000"
 
     environment:
       PAPERLESS_REDIS: redis://redis:6379
