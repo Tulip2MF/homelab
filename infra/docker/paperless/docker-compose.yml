@@ -59,6 +59,7 @@ services:
     labels:
       - "diun.enable=true"
       - homepage.group=Documents
+      - homepage.id=paperless
       - homepage.name=Paperless
       - homepage.icon=paperless
       - homepage.href=http://192.168.178.113:8010
