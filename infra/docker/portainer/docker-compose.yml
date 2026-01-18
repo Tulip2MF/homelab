@@ -1,0 +1,21 @@
+services:
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    restart: unless-stopped
+
+    user: "2001:3000"
+
+    ports:
+      - "${PORTAINER_HTTP_PORT}:9000"
+      - "${PORTAINER_HTTPS_PORT}:9443"
+
+    volumes:
+      - "${PORTAINER_DATA_PATH}:/data"
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    labels:
+      - homepage.group=Infrastructure
+      - homepage.name=Portainer
+      - homepage.icon=portainer
+      - homepage.href=https://192.168.178.113:${PORTAINER_HTTPS_PORT}
