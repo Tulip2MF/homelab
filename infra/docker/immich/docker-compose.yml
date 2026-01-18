@@ -11,7 +11,8 @@ services:
   immich-server:
     container_name: immich_server
     image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-release}
-
+    env_file:
+      - stack.env
     user: "2001:3000"
     volumes:
       - ${UPLOAD_LOCATION}:/usr/src/app/upload
