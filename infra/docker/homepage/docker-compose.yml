@@ -5,16 +5,18 @@ services:
     restart: unless-stopped
 
     user: "2001:3000"
+    group_add:
+      - "989"
 
     ports:
-      - "${HOMEPAGE_PORT}:3000"
+      - "3000:3000"
 
     environment:
-      TZ: ${TZ}
-      HOMEPAGE_ALLOWED_HOSTS: ${HOMEPAGE_ALLOWED_HOSTS}
+      TZ: Europe/Berlin
+      HOMEPAGE_ALLOWED_HOSTS: 192.168.178.113:3000
 
     volumes:
-      - ${HOMEPAGE_CONFIG}:/app/config
+      - /mnt/appdata/homepage/config:/app/config
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
     security_opt:
