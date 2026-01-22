@@ -14,6 +14,15 @@ services:
       - redis
       - database
     restart: always
+    labels:
+      - "diun.enable=true"
+      - homepage.group=Media
+      - homepage.id=immich
+      - homepage.name=Immich
+      - homepage.icon=immich
+      - homepage.href=http://192.168.178.113:2283
+      - homepage.description=Photo and Video Backup
+
 
   immich-machine-learning:
     container_name: immich_machine_learning
