@@ -20,7 +20,7 @@ services:
       - homepage.id=immich
       - homepage.name=Immich
       - homepage.icon=immich
-      - homepage.href=http://192.168.178.113:2283
+      - homepage.href=http://192.168.178.122:2283
       - homepage.description=Photo and Video Backup
 
 
