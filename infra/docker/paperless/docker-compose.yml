@@ -10,7 +10,8 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
 
     volumes:
-      - /mnt/docker/bind/paperless/db:/var/lib/postgresql/data
+      - /mnt/truenas/appdata/paperless/db:/var/lib/postgresql/data
+      - /mnt/truenas/appdata/paperless/db-backups:/backups
 
     labels:
       - "diun.enable=false"
@@ -21,7 +22,7 @@ services:
     restart: unless-stopped
 
     volumes:
-      - /mnt/docker/bind/paperless/redis:/data
+      - /mnt/truenas/appdata/paperless/redis:/data
 
     labels:
       - "diun.enable=false"
@@ -51,10 +52,10 @@ services:
       PAPERLESS_CONSUMER_POLLING: "30"
 
     volumes:
-      - /mnt/appdata/paperless/data:/usr/src/paperless/data
-      - /mnt/appdata/paperless/media:/usr/src/paperless/media
-      - /mnt/appdata/paperless/export:/usr/src/paperless/export
-      - /mnt/appdata/paperless/consume:/usr/src/paperless/consume
+      - /mnt/truenas/appdata/paperless/data:/usr/src/paperless/data
+      - /mnt/truenas/appdata/paperless/media:/usr/src/paperless/media
+      - /mnt/truenas/appdata/paperless/export:/usr/src/paperless/export
+      - /mnt/truenas/appdata/paperless/consume:/usr/src/paperless/consume
 
     labels:
       - "diun.enable=true"
@@ -62,5 +63,5 @@ services:
       - homepage.id=paperless
       - homepage.name=Paperless
       - homepage.icon=paperless
-      - homepage.href=http://192.168.178.113:8010
+      - homepage.href=http://192.168.178.122:8010
       - homepage.description=Document Management
