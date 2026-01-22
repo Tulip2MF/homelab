@@ -56,6 +56,8 @@ services:
       - /mnt/truenas/appdata/paperless/media:/usr/src/paperless/media
       - /mnt/truenas/appdata/paperless/export:/usr/src/paperless/export
       - /mnt/truenas/appdata/paperless/consume:/usr/src/paperless/consume
+      - /mnt/truenas/appdata/paperless_import_zip/export:/import
+
 
     labels:
       - "diun.enable=true"
