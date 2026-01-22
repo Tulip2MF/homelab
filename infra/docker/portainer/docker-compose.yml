@@ -18,4 +18,4 @@ services:
       - homepage.group=Infrastructure
       - homepage.name=Portainer
       - homepage.icon=portainer
-      - homepage.href=https://192.168.178.113:${PORTAINER_HTTPS_PORT}
+      - homepage.href=https://192.168.178.122:${PORTAINER_HTTPS_PORT}
