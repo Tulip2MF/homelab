@@ -29,7 +29,7 @@ services:
     image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-release}
     user: "2001:3000"
     volumes:
-      - model-cache:/cache
+      - /mnt/truenas/appdata/immich/model-cache:/cache
     env_file:
       - .env
     restart: always
