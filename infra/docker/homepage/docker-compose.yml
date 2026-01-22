@@ -4,6 +4,7 @@ services:
     container_name: homepage
     restart: unless-stopped
 
+    # Run as non-root, mapped to your TrueNAS permissions
     user: "2001:3000"
     group_add:
       - "989"
@@ -11,12 +12,14 @@ services:
     ports:
       - "3000:3000"
 
-    environment:
-      TZ: Europe/Berlin
-      HOMEPAGE_ALLOWED_HOSTS: 192.168.178.113:3000
+    env_file:
+      - .env
 
     volumes:
+      # TrueNAS-backed persistent config (REQUIRED)
       - /mnt/truenas/appdata/homepage/config:/app/config
+
+      # Docker socket (read-only)
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
     security_opt:
