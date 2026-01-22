@@ -16,7 +16,7 @@ services:
       HOMEPAGE_ALLOWED_HOSTS: 192.168.178.113:3000
 
     volumes:
-      - /mnt/appdata/homepage/config:/app/config
+      - /mnt/truenas/appdata/homepage/config:/app/config
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
     security_opt:
