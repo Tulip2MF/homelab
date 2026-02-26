@@ -1,6 +1,17 @@
 services:
+  broker:
+    image: redis:8
+    container_name: paperless-redis
+    restart: unless-stopped
+
+    volumes:
+      - /var/lib/docker/appdata/paperless/redis:/data
+
+    labels:
+      - "diun.enable=false"
+
   db:
-    image: postgres:15.6
+    image: postgres:18
     container_name: paperless-db
     restart: unless-stopped
 
@@ -10,54 +21,34 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
 
     volumes:
-      - /mnt/truenas/appdata/paperless/db:/var/lib/postgresql/data
-      - /mnt/truenas/appdata/paperless/db-backups:/backups
+      - /var/lib/docker/appdata/paperless/db:/var/lib/postgresql/data
 
     labels:
       - "diun.enable=false"
 
-  redis:
-    image: redis:7.2
-    container_name: paperless-redis
-    restart: unless-stopped
-
-    volumes:
-      - /mnt/truenas/appdata/paperless/redis:/data
-
-    labels:
-      - "diun.enable=false"
-
-  paperless:
+  webserver:
     image: ghcr.io/paperless-ngx/paperless-ngx:latest
     container_name: paperless
     restart: unless-stopped
     depends_on:
       - db
-      - redis
-
-    user: "2001:3000"
+      - broker
 
     ports:
       - "8010:8000"
 
-    environment:
-      PAPERLESS_REDIS: redis://redis:6379
-      PAPERLESS_DBHOST: db
-      PAPERLESS_DBNAME: ${DB_NAME}
-      PAPERLESS_DBUSER: ${DB_USER}
-      PAPERLESS_DBPASS: ${DB_PASSWORD}
-      PAPERLESS_TIME_ZONE: ${PAPERLESS_TIME_ZONE}
-      PAPERLESS_SECRET_KEY: ${PAPERLESS_SECRET_KEY}
-      PAPERLESS_URL: ${PAPERLESS_URL}
-      PAPERLESS_CONSUMER_POLLING: "30"
-
     volumes:
-      - /mnt/truenas/appdata/paperless/data:/usr/src/paperless/data
-      - /mnt/truenas/appdata/paperless/media:/usr/src/paperless/media
-      - /mnt/truenas/appdata/paperless/export:/usr/src/paperless/export
-      - /mnt/truenas/appdata/paperless/consume:/usr/src/paperless/consume
-      - /mnt/truenas/appdata/paperless_import_zip/export:/import
+      - /var/lib/docker/appdata/paperless/data:/usr/src/paperless/data
+      - /var/lib/docker/appdata/paperless/media:/usr/src/paperless/media
+      - /var/lib/docker/appdata/paperless/export:/usr/src/paperless/export
+      - /var/lib/docker/appdata/paperless/consume:/usr/src/paperless/consume
 
+    environment:
+      PAPERLESS_REDIS: redis://broker:6379
+      PAPERLESS_DBHOST: db
+
+    env_file:
+      - .env
 
     labels:
       - "diun.enable=true"
