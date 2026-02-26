@@ -26,6 +26,7 @@ services:
     labels:
       - "diun.enable=false"
 
+
   webserver:
     image: ghcr.io/paperless-ngx/paperless-ngx:latest
     container_name: paperless
@@ -46,6 +47,9 @@ services:
     environment:
       PAPERLESS_REDIS: redis://broker:6379
       PAPERLESS_DBHOST: db
+      PAPERLESS_DBNAME: ${DB_NAME}
+      PAPERLESS_DBUSER: ${DB_USER}
+      PAPERLESS_DBPASS: ${DB_PASSWORD}
 
     env_file:
       - .env
