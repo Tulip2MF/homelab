@@ -1,64 +1,49 @@
 services:
   broker:
-    image: redis:8
-    container_name: paperless-redis
+    image: docker.io/library/redis:8
     restart: unless-stopped
-
     volumes:
-      - /var/lib/docker/appdata/paperless/redis:/data
-
-    labels:
-      - "diun.enable=false"
+      - redisdata:/data
 
   db:
-    image: postgres:18
-    container_name: paperless-db
+    image: docker.io/library/postgres:18
     restart: unless-stopped
-
-    environment:
-      POSTGRES_DB: ${DB_NAME}
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-
     volumes:
-      - /var/lib/docker/appdata/paperless/db:/var/lib/postgresql/data
-
-    labels:
-      - "diun.enable=false"
-
+      - pgdata:/var/lib/postgresql
+    environment:
+      POSTGRES_DB: paperless
+      POSTGRES_USER: paperless
+      POSTGRES_PASSWORD: paperless
 
   webserver:
     image: ghcr.io/paperless-ngx/paperless-ngx:latest
-    container_name: paperless
     restart: unless-stopped
     depends_on:
       - db
       - broker
-
     ports:
       - "8010:8000"
-
     volumes:
-      - /var/lib/docker/appdata/paperless/data:/usr/src/paperless/data
-      - /var/lib/docker/appdata/paperless/media:/usr/src/paperless/media
-      - /var/lib/docker/appdata/paperless/export:/usr/src/paperless/export
-      - /var/lib/docker/appdata/paperless/consume:/usr/src/paperless/consume
-
+      - data:/usr/src/paperless/data
+      - media:/usr/src/paperless/media
+      - ./export:/usr/src/paperless/export
+      - ./consume:/usr/src/paperless/consume
     environment:
       PAPERLESS_REDIS: redis://broker:6379
       PAPERLESS_DBHOST: db
-      PAPERLESS_DBNAME: ${DB_NAME}
-      PAPERLESS_DBUSER: ${DB_USER}
-      PAPERLESS_DBPASS: ${DB_PASSWORD}
-
     env_file:
-      - .env
-
+      - stack.env
     labels:
       - "diun.enable=true"
-      - homepage.group=Documents
-      - homepage.id=paperless
-      - homepage.name=Paperless
-      - homepage.icon=paperless
-      - homepage.href=http://192.168.178.141:8010
-      - homepage.description=Document Management
+      - "homepage.group=Documents"
+      - "homepage.id=paperless"
+      - "homepage.name=Paperless"
+      - "homepage.icon=paperless"
+      - "homepage.href=http://192.168.178.141:8010"
+      - "homepage.description=Document Management"
+
+volumes:
+  data:
+  media:
+  pgdata:
+  redisdata:
