@@ -65,5 +65,5 @@ services:
       - homepage.id=paperless
       - homepage.name=Paperless
       - homepage.icon=paperless
-      - homepage.href=http://192.168.178.122:8010
+      - homepage.href=http://192.168.178.141:8010
       - homepage.description=Document Management
