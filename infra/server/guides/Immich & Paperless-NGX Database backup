@@ -1,0 +1,1013 @@
+# Homelab App Backup Procedure
+## Immich & Paperless-NGX → TrueNAS → pCloud
+
+---
+
+## 1. Purpose
+
+This document describes how to implement **application-level backups for Immich and Paperless-NGX** and upload them to **pCloud** while ensuring that:
+
+- Backups **do not reside permanently on the Debian Docker VM**
+- Backups are stored **first on TrueNAS**
+- **rclone on the Debian VM** uploads the backups to pCloud
+- Backup data remains **separated from VM-level backups**
+
+This provides an additional safety layer beyond Proxmox Backup Server (PBS).
+
+---
+
+## 2. Architecture Overview
+
+The backup pipeline follows this flow:
+
+```
+Applications (Immich / Paperless)
+        │
+        ▼
+Export scripts (Debian Docker VM)
+        │
+        ▼
+Debian VM (NFS mount)
+/mnt/truenas-app-backups
+        │
+        ▼
+TrueNAS dataset
+/mnt/tank/backups/app-exports
+        │
+        ▼
+rclone upload
+        │
+        ▼
+pCloud off-site storage
+```
+
+**Important design principle:**
+
+- **Debian VM acts only as a transport node**
+- **TrueNAS is the storage authority**
+
+---
+
+## 3. Current Storage Layout
+
+Current TrueNAS structure:
+
+```
+tank
+ ├── backups
+ │    └── proxmox-backups
+ ├── forensics
+ └── home-proxmox
+```
+
+After this guide, the layout becomes:
+
+```
+tank
+ └── backups
+      ├── proxmox-backups
+      └── app-exports
+           ├── immich
+           └── paperless
+```
+
+| Dataset | Purpose |
+|---|---|
+| `proxmox-backups` | PBS VM backups |
+| `app-exports` | Application exports |
+| `forensics` | Tier-0 logs |
+| `home-proxmox` | Proxmox NFS storage |
+
+---
+
+## 4. Creating the Dataset in TrueNAS
+
+### Step 1 — Create Parent Dataset
+
+In TrueNAS UI:
+
+```
+Storage → Datasets → tank → backups → Add Dataset
+```
+
+Set name to `app-exports` and click **Save**.
+
+### Step 2 — Create Child Datasets
+
+Create two additional datasets:
+
+```
+tank/backups/app-exports/immich
+tank/backups/app-exports/paperless
+```
+
+---
+
+## 5. Configure NFS Share
+
+The Debian VM must access the dataset via NFS.
+
+In TrueNAS:
+
+```
+Sharing → Unix Shares (NFS) → Add
+```
+
+Configuration:
+
+```
+Path:                /mnt/tank/backups/app-exports
+Authorized Networks: 192.168.178.141/32
+```
+
+> **Note:** The authorized network is set to a single host using `/32` CIDR notation. If your VM's IP changes, the NFS mount will fail. To prevent this, either set a DHCP reservation on your router for the VM, or use a subnet (`192.168.178.0/24`) to allow all hosts on the network.
+
+> **Permissions:** If the script user on the Debian VM (typically `root`) does not match the dataset owner on TrueNAS, you will get `Permission Denied` errors. In TrueNAS, edit the NFS share and set **Mapall User** to `root`. This maps all incoming NFS requests to that user, preventing permission mismatches.
+
+---
+
+## 6. Mount the Dataset on Debian VM
+
+Edit the filesystem table:
+
+```bash
+sudo nano /etc/fstab
+```
+
+Add:
+
+```
+192.168.178.139:/mnt/tank/backups/app-exports  /mnt/truenas-app-backups  nfs  rw,hard,timeo=600,retrans=5,nofail  0 0
+```
+
+| Option | Meaning |
+|---|---|
+| `rw` | read/write access |
+| `hard` | retries forever instead of failing writes — prevents silent data corruption |
+| `timeo=600` | timeout in tenths of seconds (60 seconds) |
+| `retrans=5` | retry count before returning an error |
+| `nofail` | system still boots if mount fails |
+
+> **Why `hard` instead of `soft`:** A `soft` mount returns an error to the writing process if the NFS server becomes temporarily unreachable. For backup workloads, this can cause silent data corruption — the script may continue believing the write succeeded. A `hard` mount retries indefinitely until the server responds. Combined with `nofail`, the system still boots cleanly if TrueNAS is offline at startup.
+
+Create mount directory:
+
+```bash
+sudo mkdir -p /mnt/truenas-app-backups
+```
+
+Mount the share:
+
+```bash
+sudo mount -a
+```
+
+Verify mount:
+
+```bash
+ls /mnt/truenas-app-backups
+```
+
+Expected output:
+
+```
+immich
+paperless
+```
+
+---
+
+## 7. Installing rclone on Debian
+
+```bash
+sudo apt update
+sudo apt install rclone
+```
+
+Verify installation:
+
+```bash
+rclone version
+```
+
+Verify `--backup-dir` flag support:
+
+```bash
+rclone sync --help | grep backup-dir
+```
+
+Expected output: a line containing `--backup-dir`. If nothing is returned, upgrade rclone before proceeding — the upload script depends on this flag.
+
+---
+
+## 8. Configure pCloud Remote
+
+```bash
+rclone config
+```
+
+Steps:
+
+```
+n → New remote
+name → pcloud
+storage → pcloud
+```
+
+Region selection:
+
+```
+1 → United States
+2 → Europe
+```
+
+Choose your region, then authorize via browser. Configuration is saved to:
+
+```
+~/.config/rclone/rclone.conf
+```
+
+---
+
+## 9. Test Connection
+
+```bash
+rclone lsd pcloud:
+```
+
+Expected output:
+
+```
+homelab-app-exports
+```
+
+---
+
+## 10. Upload Destination Structure
+
+Create the following folder in pCloud:
+
+```
+pcloud:/homelab-app-exports
+```
+
+Final structure:
+
+```
+pcloud
+ └── homelab-app-exports
+      ├── immich
+      └── paperless
+```
+
+---
+
+## 11. Paperless Backup Script
+
+Create script:
+
+```bash
+sudo nano /usr/local/bin/backup-paperless.sh
+```
+
+Script:
+
+```bash
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+DATE=$(date +%F)
+
+# TrueNAS destination
+DEST="/mnt/truenas-app-backups/paperless"
+
+# Temporary location inside container
+TMP="/tmp/paperless-export"
+
+mkdir -p "$DEST"
+
+# Verify the TrueNAS mount is available before proceeding.
+# Without this check, a failed mount would cause the export to write to the
+# local filesystem instead of TrueNAS, silently defeating the backup design.
+if ! mountpoint -q /mnt/truenas-app-backups; then
+    echo "ERROR: TrueNAS backup mount not available"
+    exit 1
+fi
+
+# Verify the mount is actually writable, not just present.
+# A stale NFS mount can pass the mountpoint check but fail on writes.
+if ! touch /mnt/truenas-app-backups/.mount_test 2>/dev/null; then
+    echo "ERROR: Backup destination not writable — mount may be stale"
+    exit 1
+fi
+rm -f /mnt/truenas-app-backups/.mount_test
+
+# Check available disk space on the backup destination.
+# Exports can grow large over time — a full dataset causes cryptic failures mid-export.
+# Requires at least 1GB free before proceeding.
+FREE=$(df -P /mnt/truenas-app-backups | awk 'NR==2 {print $4}')
+if [ "$FREE" -lt 1048576 ]; then
+    echo "ERROR: Less than 1GB free space on backup destination (${FREE}KB available)"
+    exit 1
+fi
+
+echo "Starting Paperless export $(date)"
+
+cleanup() {
+    # Attempt to remove temporary export directory
+    docker exec paperless-webserver-1 rm -rf "$TMP" 2>/dev/null || \
+        echo "Warning: cleanup of $TMP failed" >&2
+
+    # Remove temporary archive
+    docker exec paperless-webserver-1 rm -f /tmp/paperless-${DATE}.tar.gz 2>/dev/null || \
+        echo "Warning: cleanup of archive failed" >&2
+}
+
+# Runs on both success and failure to prevent container disk buildup
+trap cleanup EXIT
+
+# Verify the Paperless container is running before attempting export.
+docker ps --format '{{.Names}}' | grep -q paperless-webserver-1 \
+    || { echo "ERROR: Paperless container not running"; exit 1; }
+
+# NOTE:
+# $TMP expands on the host and becomes /tmp/paperless-export inside the container.
+# This is intentional because /tmp exists inside the container filesystem.
+echo "Running Paperless document exporter..."
+docker exec paperless-webserver-1 \
+    python manage.py document_exporter "$TMP"
+
+# Compress export directory inside container.
+# Uses pigz (parallel gzip) if available for faster compression on multi-core CPUs,
+# falls back to standard gzip otherwise.
+docker exec paperless-webserver-1 bash -c \
+    "command -v pigz >/dev/null 2>&1 \
+        && tar -I pigz -cf /tmp/paperless-${DATE}.tar.gz -C \"${TMP}\" . \
+        || tar -czf /tmp/paperless-${DATE}.tar.gz -C \"${TMP}\" ."
+
+# Copy archive to TrueNAS dataset
+docker cp paperless-webserver-1:/tmp/paperless-${DATE}.tar.gz \
+    "$DEST/paperless-${DATE}.tar.gz"
+
+echo "Paperless backup completed $(date)"
+```
+
+Make executable:
+
+```bash
+sudo chmod +x /usr/local/bin/backup-paperless.sh
+```
+
+| Step | Purpose |
+|---|---|
+| mount guard | exits if TrueNAS NFS mount is unavailable — prevents export writing to local disk |
+| write test | verifies the mount is actually writable — catches stale NFS mounts that pass the mountpoint check |
+| disk space guard | exits if less than 1GB free on destination — prevents cryptic mid-export failures |
+| container guard | exits cleanly with a clear error if the container isn't running |
+| `document_exporter` | exports documents to a directory |
+| `tar` inside container | creates compressed archive — uses `pigz` for parallel compression if installed, falls back to `gzip` |
+| `docker cp` | copies archive to TrueNAS |
+| `trap cleanup EXIT` | always cleans up container temp files on both success and failure |
+
+> **Note on variable expansion:** `$TMP` and `$DATE` are host shell variables. They expand on the host before being passed to the container. The container receives fully resolved paths such as `/tmp/paperless-export` and `/tmp/paperless-2026-03-06.tar.gz`.
+
+> **Note on container name:** `paperless-webserver-1` is the default container name when using Docker Compose from the `paperless-ngx` directory. If you deploy from a differently named directory or use a custom stack name, the container name will differ. Verify with `docker ps | grep paperless` before running the script.
+
+---
+
+## 12. Immich Backup Script
+
+Before writing the script, find your actual Immich container names:
+
+```bash
+docker ps | grep immich
+```
+
+Common names you may see:
+
+```
+immich_server
+immich-server
+immich_server_1
+immich_server_immich-server_1
+```
+
+Once you have confirmed the correct server and postgres container names, update them in the script and in all restore commands. Then inspect the upload volume path:
+
+```bash
+docker inspect <your-immich-server-container> --format '{{ json .Mounts }}'
+```
+
+Look for the mount with `Destination: /usr/src/app/upload` and note the `Source` path on the host. Update `IMMICH_UPLOAD` in the script accordingly.
+
+Create script:
+
+```bash
+sudo nano /usr/local/bin/backup-immich.sh
+```
+
+Script:
+
+```bash
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+DATE=$(date +%F)
+
+# CHANGE THIS to the actual path discovered from docker inspect
+IMMICH_UPLOAD="/mnt/immich/library"
+
+DEST="/mnt/truenas-app-backups/immich"
+
+mkdir -p "$DEST"
+
+echo "Starting Immich database dump $(date)"
+
+# Verify the TrueNAS backup mount is available before proceeding.
+# If the NFS mount has silently failed and the directory appears empty,
+# rsync --delete-delay would delete all files in the destination.
+if ! mountpoint -q /mnt/truenas-app-backups; then
+    echo "ERROR: TrueNAS backup mount not available at /mnt/truenas-app-backups"
+    exit 1
+fi
+
+# Verify the mount is actually writable, not just present.
+if ! touch /mnt/truenas-app-backups/.mount_test 2>/dev/null; then
+    echo "ERROR: Backup destination not writable — mount may be stale"
+    exit 1
+fi
+rm -f /mnt/truenas-app-backups/.mount_test
+
+# Dump the Immich database only (not all system databases).
+# pg_dump targets the single 'immich' database — smaller, faster, and avoids
+# unnecessary system roles and objects that pg_dumpall would include.
+docker exec immich_postgres \
+    pg_dump -U postgres immich > "$DEST/immich-db-dump-${DATE}.sql"
+
+echo "Starting Immich library rsync $(date)"
+
+# Verify the Immich upload directory exists before running rsync.
+# If the path has changed or the volume is unmounted, rsync against a missing
+# source with --delete-delay would remove all files from the destination.
+if [ ! -d "$IMMICH_UPLOAD" ]; then
+    echo "ERROR: Immich upload directory not found at $IMMICH_UPLOAD"
+    exit 1
+fi
+
+rsync -av --numeric-ids --delete-delay --info=progress2 \
+    "$IMMICH_UPLOAD/" \
+    "$DEST/library/"
+
+echo "Immich backup completed $(date)"
+```
+
+Make executable:
+
+```bash
+sudo chmod +x /usr/local/bin/backup-immich.sh
+```
+
+| Step | Purpose |
+|---|---|
+| mount guard | exits cleanly if the NFS mount is unavailable — prevents rsync from deleting the destination if the source appears empty |
+| write test | verifies the mount is actually writable — catches stale NFS mounts that pass the mountpoint check |
+| source directory guard | exits if `IMMICH_UPLOAD` path does not exist — prevents accidental empty-source deletion |
+| `pg_dump immich` | dumps only the Immich database — smaller, faster, no unnecessary system objects |
+| `rsync -a` | archive mode — preserves permissions, timestamps, symlinks |
+| `rsync --numeric-ids` | preserves UID/GID numerically — prevents permission drift if user IDs differ between systems |
+| `rsync --delete-delay` | defers deletions until after transfer, preventing catastrophic loss if source disappears |
+| `rsync --info=progress2` | shows overall transfer progress during manual runs — cron logs remain clean |
+| separate `library/` subdir | keeps DB dump and image files clearly separated on TrueNAS |
+
+> **Note on `--info=progress2`:** unlike the default per-file output, this flag shows a single updating line with overall progress and speed. In cron, it produces one summary line per transfer rather than flooding the log with per-file entries.
+
+> **Important:** Immich stores all metadata — albums, people tags, sharing, organisational structure — in its PostgreSQL database, not in the image files themselves. Backing up only the library files would leave you with images but no metadata on restore. Always run the database dump before rsync.
+
+---
+
+## 13. rclone Upload Script
+
+Create script:
+
+```bash
+sudo nano /usr/local/bin/pcloud-export-backup.sh
+```
+
+Script:
+
+```bash
+#!/usr/bin/env bash
+
+# set -e is intentionally omitted:
+# rclone may return non-zero on partial failures (locked files, transient
+# network issues). We handle errors manually via $STATUS instead.
+set -uo pipefail
+
+SOURCE="/mnt/truenas-app-backups"
+REMOTE="pcloud:homelab-app-exports"
+
+# Dated backup-dir acts as a remote recycle bin.
+# If files are deleted from TrueNAS by accident or a script bug,
+# rclone moves them here instead of permanently deleting them from pCloud.
+BACKUP_DIR="pcloud:homelab-app-exports-deleted/$(date +%F)"
+
+LOG="/var/log/pcloud-export-backup.log"
+
+echo "========== pCloud upload started $(date) ==========" >> "$LOG"
+
+# Verify the TrueNAS mount is available before syncing.
+# If the mount has silently failed and the directory appears empty,
+# rclone sync would propagate the deletions to pCloud.
+if ! mountpoint -q /mnt/truenas-app-backups; then
+    echo "ERROR: TrueNAS mount not available — aborting upload" >> "$LOG"
+    echo "Upload aborted $(date)" >> "$LOG"
+    exit 1
+fi
+
+# Verify the mount is actually writable, not just present.
+if ! touch /mnt/truenas-app-backups/.mount_test 2>/dev/null; then
+    echo "ERROR: TrueNAS mount not writable — possible stale NFS mount" >> "$LOG"
+    echo "Upload aborted $(date)" >> "$LOG"
+    exit 1
+fi
+rm -f /mnt/truenas-app-backups/.mount_test
+
+mkdir -p /var/tmp/rclone-partial
+
+rclone sync "$SOURCE" "$REMOTE" \
+    --backup-dir "$BACKUP_DIR" \
+    --transfers 4 \
+    --checkers 8 \
+    --retries 5 \
+    --low-level-retries 10 \
+    --ignore-errors \
+    --partial \
+    --partial-dir /var/tmp/rclone-partial \
+    --human-readable \
+    --log-file "$LOG" \
+    --log-level INFO
+
+STATUS=$?
+
+if [ $STATUS -ne 0 ]; then
+    echo "rclone finished with warnings (exit code $STATUS)" >> "$LOG"
+else
+    echo "========== Upload completed successfully $(date) ==========" >> "$LOG"
+fi
+```
+
+Make executable:
+
+```bash
+sudo chmod +x /usr/local/bin/pcloud-export-backup.sh
+```
+
+| Flag | Purpose |
+|---|---|
+| `sync` | ensures destination mirrors source |
+| `--backup-dir` | moves deleted/overwritten files to a dated folder instead of permanently deleting them |
+| `--transfers` | parallel upload count |
+| `--checkers` | verification threads |
+| `--retries` | retry attempts per file |
+| `--ignore-errors` | prevents abort on single file failure |
+| `--partial` | keeps partially uploaded files on interruption |
+| `--partial-dir` | stages incomplete uploads in `/var/tmp/rclone-partial` — persistent across reboots, keeps incomplete files off the TrueNAS dataset, prevents snapshot pollution |
+| `--human-readable` | log sizes as `2.4 GiB` instead of raw byte counts |
+| `--log-level INFO` | useful diagnostics without excessive verbosity |
+
+> **Why `--backup-dir` instead of plain `sync`:** `rclone sync` without a backup directory will permanently delete files from pCloud if they are removed from TrueNAS — whether intentionally or due to a script bug. `--backup-dir` moves those files into a dated folder (`homelab-app-exports-deleted/YYYY-MM-DD`) on pCloud instead, giving you a recoverable history. You can periodically clean up old dated folders manually.
+
+---
+
+## 14. Automating the Backups
+
+Edit cron:
+
+```bash
+crontab -e
+```
+
+Cron entries:
+
+```
+# 05:00 — Paperless export to TrueNAS
+0 5 * * * /bin/bash /usr/local/bin/backup-paperless.sh >> /var/log/paperless-backup.log 2>&1
+
+# 05:30 — Immich incremental backup to TrueNAS
+30 5 * * * /bin/bash /usr/local/bin/backup-immich.sh >> /var/log/immich-backup.log 2>&1
+
+# 06:30 — Upload TrueNAS exports to pCloud (logs handled internally by script)
+30 6 * * * /bin/bash /usr/local/bin/pcloud-export-backup.sh
+
+# 07:00 — Daily integrity check of pCloud against TrueNAS
+0 7 * * * /bin/bash /usr/local/bin/pcloud-integrity-check.sh
+```
+
+> **Note:** The rclone scripts manage their own log files internally via `--log-file`. No cron redirection is needed for those jobs — avoid it to prevent duplicate log entries.
+
+---
+
+## 15. Daily Integrity Check Script
+
+Running `rclone check` daily verifies that the pCloud copy exactly matches the TrueNAS dataset. This catches silent corruption or incomplete uploads within 24 hours — long before you ever need a restore. A weekly schedule would leave up to 6 days of undetected inconsistency given that backups run daily.
+
+Create script:
+
+```bash
+sudo nano /usr/local/bin/pcloud-integrity-check.sh
+```
+
+Script:
+
+```bash
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+SOURCE="/mnt/truenas-app-backups"
+REMOTE="pcloud:homelab-app-exports"
+
+LOG="/var/log/pcloud-integrity-check.log"
+
+echo "========== Integrity check started $(date) ==========" >> "$LOG"
+
+# Verify the TrueNAS mount is available before checking.
+# A failed mount would cause rclone to see an empty source and
+# incorrectly report every file on pCloud as missing.
+if ! mountpoint -q /mnt/truenas-app-backups; then
+    echo "ERROR: TrueNAS mount not available — integrity check skipped $(date)" >> "$LOG"
+    exit 1
+fi
+
+rclone check "$SOURCE" "$REMOTE" \
+    --one-way \
+    --human-readable \
+    --log-file "$LOG" \
+    --log-level INFO
+
+STATUS=$?
+
+if [ $STATUS -ne 0 ]; then
+    echo "========== Integrity check FAILED $(date) (exit code $STATUS) ==========" >> "$LOG"
+    echo "Review $LOG immediately and consider re-running the upload script." >> "$LOG"
+else
+    echo "========== Integrity check passed — pCloud matches TrueNAS $(date) ==========" >> "$LOG"
+fi
+```
+
+Make executable:
+
+```bash
+sudo chmod +x /usr/local/bin/pcloud-integrity-check.sh
+```
+
+| Flag | Purpose |
+|---|---|
+| `check` | compares file size and modification time — does not transfer any data |
+| `--one-way` | verifies all TrueNAS files exist and match in pCloud, ignoring extra files on pCloud — correct since pCloud may contain historical files from `--backup-dir` |
+| `--human-readable` | sizes shown as `2.4 GiB` rather than raw byte counts |
+| `--log-level INFO` | records every file checked, not just errors |
+
+> **What `rclone check` detects:** files present on TrueNAS but missing from pCloud (incomplete uploads), files present on pCloud but missing from TrueNAS (unexpected deletions), and size or modification time mismatches. By default `rclone check` compares file size and modification time rather than full cryptographic checksums — this is fast and sufficient for most homelab use. Add `--download` for byte-level verification, but this forces a full download of every file and will be significantly slower.
+
+> **What to do on failure:** a non-zero exit means at least one file differs. Review the log to identify which files are affected, then re-run `/usr/local/bin/pcloud-export-backup.sh` to resync. If corruption is on the TrueNAS side, restore from a ZFS snapshot before resyncing.
+
+---
+
+## 16. Log Rotation
+
+Without log rotation, backup logs will grow indefinitely. Create a logrotate configuration covering all four log files:
+
+```bash
+sudo nano /etc/logrotate.d/homelab-backups
+```
+
+Configuration:
+
+```
+/var/log/pcloud-export-backup.log
+/var/log/pcloud-integrity-check.log
+/var/log/paperless-backup.log
+/var/log/immich-backup.log
+{
+    weekly
+    rotate 12
+    compress
+    missingok
+    notifempty
+    dateext
+    create 0644 root root
+}
+```
+
+| Option | Meaning |
+|---|---|
+| `weekly` | rotate once per week |
+| `rotate 12` | keep 12 weeks of logs |
+| `compress` | gzip older log files |
+| `missingok` | no error if log file is absent |
+| `notifempty` | skip rotation if log is empty |
+| `dateext` | append date to rotated filename |
+| `create 0644 root root` | recreates log file after rotation with correct permissions |
+
+Example rotated filenames:
+
+```
+pcloud-export-backup.log-2026-03-08.gz
+pcloud-integrity-check.log-2026-03-08.gz
+paperless-backup.log-2026-03-08.gz
+immich-backup.log-2026-03-08.gz
+```
+
+---
+
+## 17. Enable ZFS Snapshot Protection
+
+Snapshots protect backups from accidental deletion, ransomware, and script bugs.
+
+In TrueNAS:
+
+```
+Data Protection → Periodic Snapshot Tasks → Add
+```
+
+Configuration:
+
+```
+Dataset:   tank/backups/app-exports
+Schedule:  Every 6 hours
+Lifetime:  30 days
+```
+
+At 4 snapshots per day over 30 days, this retains approximately **120 snapshots**. Snapshots use minimal storage due to ZFS copy-on-write — only blocks that have actually changed since the previous snapshot are stored.
+
+**Manual snapshot access:**
+
+```bash
+ls /mnt/tank/backups/app-exports/.zfs/snapshot/
+```
+
+Each snapshot appears as a dated directory containing a full read-only view of the dataset at that point in time. Copy files directly from there to recover them without any restore tooling.
+
+---
+
+## 18. Optional: Failure Alerting
+
+Currently, failures are logged but produce no active notification. To add alerting, include a failure trap in each script after any existing `trap cleanup EXIT` line:
+
+```bash
+on_failure() {
+    echo "ERROR: backup failed at $(date)" >&2
+    # Uncomment and configure one of the following:
+    # curl -d "backup failed" https://your-gotify-instance/message?token=TOKEN
+    # curl -fsS -m 10 --retry 5 https://hc-ping.com/your-uuid/fail
+}
+trap on_failure ERR
+```
+
+Compatible notification options: Gotify, Healthchecks.io, ntfy, or a simple email via `mail`.
+
+---
+
+## 19. Restore Procedures
+
+### Restore Paperless
+
+Download backup from pCloud:
+
+```bash
+rclone copy \
+    pcloud:homelab-app-exports/paperless \
+    /restore/paperless
+```
+
+Extract the most recent archive automatically:
+
+```bash
+mkdir -p /tmp/restore-paperless
+LATEST=$(ls -t /restore/paperless/*.tar.gz 2>/dev/null | head -n1)
+if [ -z "$LATEST" ]; then
+    echo "ERROR: No Paperless backup archives found in /restore/paperless"
+    exit 1
+fi
+tar -xzf "$LATEST" -C /tmp/restore-paperless
+```
+
+Or specify a date manually:
+
+```bash
+tar -xzf /restore/paperless/paperless-YYYY-MM-DD.tar.gz -C /tmp/restore-paperless
+```
+
+Run importer:
+
+```bash
+docker exec -it paperless-webserver-1 \
+    python manage.py document_importer /tmp/restore-paperless
+```
+
+### Restore Immich
+
+Download files from pCloud:
+
+```bash
+rclone copy \
+    pcloud:homelab-app-exports/immich \
+    /restore/immich
+```
+
+```bash
+# 1. Stop application services only — keep the database container running.
+#    docker compose down would stop immich_postgres, making docker exec fail.
+docker compose stop immich-server immich-microservices
+
+# 2. Wipe the current database and restore from dump.
+docker exec -i immich_postgres dropdb -U postgres immich --if-exists
+docker exec -i immich_postgres createdb -U postgres immich
+
+# Automatically select the most recent database dump
+LATEST_DB=$(ls -t /restore/immich/immich-db-dump-*.sql 2>/dev/null | head -n1)
+if [ -z "$LATEST_DB" ]; then
+    echo "ERROR: No Immich database dumps found in /restore/immich"
+    exit 1
+fi
+echo "Restoring database from: $LATEST_DB"
+docker exec -i immich_postgres psql -U postgres immich < "$LATEST_DB"
+
+# 3. Restore library files
+rsync -av /restore/immich/library/ /mnt/immich/library/
+
+# 4. Restart all services
+docker compose up -d
+```
+
+> **Important:** Do not run `docker compose down` before the database restore. If `immich_postgres` is stopped, `docker exec` will fail. Stop only the application services while leaving the database container running.
+
+> **Version compatibility:** Restore into the same or newer version of Immich to avoid database schema incompatibilities.
+
+---
+
+## 20. Emergency Restore Cheat Sheet
+
+Use this section in a total disaster scenario where your Debian VM, TrueNAS dataset, or both have been wiped.
+
+### Step 1 — Restore Infrastructure
+
+Before running any restore commands, rebuild the foundation:
+
+- **TrueNAS:** Re-create the `app-exports` dataset and NFS share as described in Sections 4 and 5.
+- **Debian VM:** Re-mount the NFS share (Section 6) and verify `rclone` is installed and configured (Sections 7–8).
+
+### Step 2 — Pull Everything Back from pCloud
+
+```bash
+# Ensure the mount directory exists after rebuilding the VM
+mkdir -p /mnt/truenas-app-backups
+
+# Pull all exports from pCloud back to TrueNAS
+rclone copy pcloud:homelab-app-exports /mnt/truenas-app-backups -P
+```
+
+The `-P` flag shows live progress. This may take time depending on the size of your Immich library.
+
+Verify the download completed before proceeding:
+
+```bash
+ls /mnt/truenas-app-backups
+ls /mnt/truenas-app-backups/immich
+ls /mnt/truenas-app-backups/paperless
+```
+
+Check that dataset sizes look reasonable:
+
+```bash
+du -sh /mnt/truenas-app-backups/*
+```
+
+A suspiciously small total (a few kilobytes) likely indicates an incomplete download or a mount failure. Do not proceed with a restore until the sizes match your expectations.
+
+### Step 3 — Restore Paperless-NGX
+
+```bash
+# Verify the mount is available before restoring.
+mountpoint -q /mnt/truenas-app-backups || {
+    echo "ERROR: TrueNAS not mounted"
+    exit 1
+}
+
+# 1. Extract the most recent backup automatically
+mkdir -p /tmp/restore-paperless
+LATEST=$(ls -t /mnt/truenas-app-backups/paperless/*.tar.gz 2>/dev/null | head -n1)
+if [ -z "$LATEST" ]; then
+    echo "ERROR: No Paperless backup archives found in /mnt/truenas-app-backups/paperless"
+    exit 1
+fi
+echo "Restoring from: $LATEST"
+tar -xzf "$LATEST" -C /tmp/restore-paperless
+
+# 2. Run the importer
+docker exec -it paperless-webserver-1 python manage.py document_importer /tmp/restore-paperless
+```
+
+To restore a specific date instead:
+
+```bash
+tar -xzf /mnt/truenas-app-backups/paperless/paperless-YYYY-MM-DD.tar.gz -C /tmp/restore-paperless
+```
+
+### Step 4 — Restore Immich
+
+```bash
+# 1. Stop application services — keep the database container running
+docker compose stop immich-server immich-microservices
+
+# 2. Wipe and restore the database
+docker exec -i immich_postgres dropdb -U postgres immich --if-exists
+docker exec -i immich_postgres createdb -U postgres immich
+
+LATEST_DB=$(ls -t /mnt/truenas-app-backups/immich/immich-db-dump-*.sql 2>/dev/null | head -n1)
+if [ -z "$LATEST_DB" ]; then
+    echo "ERROR: No Immich database dumps found in /mnt/truenas-app-backups/immich"
+    exit 1
+fi
+echo "Restoring database from: $LATEST_DB"
+docker exec -i immich_postgres psql -U postgres immich < "$LATEST_DB"
+
+# 3. Restore library files
+rsync -av /mnt/truenas-app-backups/immich/library/ /mnt/immich/library/
+
+# 4. Bring all services back up
+docker compose up -d
+```
+
+> **Important:** The `dropdb` / `createdb` sequence ensures a clean restore. Always wipe and recreate before importing. Do not run `docker compose down` — this stops `immich_postgres` and makes `docker exec` fail.
+
+---
+
+## 21. Final Backup Layers
+
+| Layer | Description |
+|---|---|
+| ZFS snapshots | protects dataset from deletion and corruption |
+| TrueNAS storage | primary backup repository |
+| pCloud | off-site disaster recovery |
+| PBS backups | full VM restore |
+
+---
+
+## 22. Final Dataset Layout
+
+```
+tank
+ ├── backups
+ │    ├── proxmox-backups
+ │    └── app-exports
+ │         ├── immich
+ │         └── paperless
+ ├── forensics
+ └── home-proxmox
+```
+
+---
+
+## 23. Daily Backup Timeline
+
+```
+05:00  Paperless export to TrueNAS
+05:30  Immich rsync to TrueNAS
+06:30  rclone upload from TrueNAS to pCloud
+07:00  rclone integrity check — pCloud vs TrueNAS
+```
+
+---
+
+## 24. Data Flow
+
+```
+Immich / Paperless
+        │
+        ▼
+Application export scripts
+        │
+        ▼
+Debian VM (NFS mount)
+/mnt/truenas-app-backups
+        │
+        ▼
+TrueNAS dataset
+tank/backups/app-exports
+        │
+        ▼
+rclone (running on Debian VM)
+        │
+        ▼
+pCloud off-site storage
+```
+
+The Debian VM contains **no persistent backups**. TrueNAS remains the storage authority.
+
+---
+
+*End of App Backup Guide*
