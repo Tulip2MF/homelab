@@ -1,0 +1,666 @@
+# Homelab-AB
+## Infrastructure Design & Authority Document
+### Updated — Hardware Revision Incorporated
+
+---
+
+## Document Authority & Precedence
+
+| Rank | Document | Role |
+|---|---|---|
+| 1 (Root) | Homelab-AB — Section 2 (Tier-0) | ABSOLUTE AUTHORITY |
+| 2 | Homelab-AB — Sections 1, 3–8 | Architecture contracts |
+| 3 | Operator Handbook | Execution |
+| 4 | Version Upgrade Policy | Controlled change |
+| 5 | System Build & Disaster Rebuild | Exceptional procedures |
+
+---
+
+## Section 1 — Infrastructure Overview & Static Design Contract
+
+### Role of This Section
+
+This section defines the **PHYSICAL, LOGICAL, and ARCHITECTURAL** layout of the system. It describes what **EXISTS**, what **DOES NOT EXIST**, where components live, and how data is intended to flow.
+
+This section is **DESCRIPTIVE, not ENFORCING.** Operational authority, safety gating, and failure handling are defined in **Section 2 — Tier-0 Platform Integrity & System Authority.**
+
+> If any conflict exists between this section and Section 2: **→ SECTION 2 WINS.**
+
+---
+
+### 1.0 Core Design Principles (Locked)
+
+**Primary Goals:**
+
+- Integrity > Availability
+- Silent failure is unacceptable
+- Partial or misleading success is WORSE than a hard stop
+- Recovery must be deterministic and auditable
+- User data protection is achieved through RAID-Z2 + replicated backups
+
+**Accepted Trade-offs:**
+
+- Primary storage availability now depends on the Proxmox host
+- A host-level failure may temporarily remove access to all data
+- A data-loss window of up to 24 hours (RPO = 24h) is accepted
+
+**Non-Goals:**
+
+- High availability
+- Multi-node clustering
+- Continuous replication
+- Zero-downtime upgrades
+- Autonomous self-healing
+
+This system is intentionally **SIMPLE, SINGLE-NODE, and OPERATOR-LED.**
+
+---
+
+### 1.1 Physical Hardware Layout
+
+> ■ **UPDATED — Hardware Revision**
+
+**Compute & Storage Platform**
+
+- CPU: Intel Core i5-4600
+- Motherboard: GIGABYTE B760M GAMING X DDR4
+- Host OS: Proxmox VE
+- Primary Boot Drive: Samsung 990 PRO NVMe M.2 SSD, 2TB
+  - Used as the Proxmox host boot drive and primary application data store (Docker VM volumes)
+  - A dedicated partition on this drive hosts Docker container volumes (replacing prior NAS-mapped layout)
+- HBA Controller: LSI SAS 9300-16i — 12 Gbps SAS/SATA Host Bus Adapter
+  - 5 drives connected and passed directly (raw) to TrueNAS VM
+  - 3 × 4 TB HDD + 2 × 8 TB HDD
+
+**Primary Storage (TrueNAS)**
+
+- TrueNAS running as a VM on Proxmox
+- Physical HDD disks passed through raw via the LSI SAS HBA (PCIe passthrough)
+- ZFS pool configured as RAID-Z2 across all 5 drives
+- Usable capacity: ~10 TB
+- Purpose: **AUTHORITATIVE USER DATA STORAGE**
+  - User files (photos, documents, media, etc.)
+  - Application persistent data
+  - Local ZFS snapshots
+
+**Docker Container Storage — UPDATED**
+
+> ■ Change from prior design: Docker container persistent volumes are no longer mapped to TrueNAS directly. They are hosted on a dedicated partition of the Samsung 990 PRO NVMe SSD (2TB) on the Proxmox host.
+
+- NVMe partition is formatted and assigned to the Docker VM (VM 102)
+- Application runtime data (Docker container volumes, user-accessible app data) is hosted on the NVMe partition
+- Container-local state (databases, configs, caches) resides on the NVMe partition
+
+**Backup Storage**
+
+- Primary on-site backup: Synology DS214+
+  - Filesystem: Btrfs (preferred) or ext4 (legacy)
+  - Purpose: **SECONDARY BACKUP TARGET ONLY**
+  - Powered on automatically during the replication window
+  - Receives daily replicated backup data from TrueNAS
+- Proxmox Backup Server (PBS): Running on a separate Mini PC
+  - Backs up TrueNAS VM and the Debian Docker VM nightly
+  - Provides structured VM-level restore capability
+
+**Off-Site / Cloud Backup**
+
+- Provider: Filen Cloud
+- Backup archives on TrueNAS are uploaded to Filen Cloud via rclone crypt, running on the Debian VM
+- Cloud copy is non-authoritative and disaster-recovery only
+
+> **IMPORTANT TRUTH STATEMENT:** Primary storage integrity and availability are now coupled to the Proxmox host and TrueNAS VM. Loss of the Proxmox host will temporarily remove storage access. This is an intentional design decision.
+
+---
+
+### 1.2 Network Topology & Failure Domain
+
+**Topology (Locked):**
+
+- Single physical Ethernet switch
+- Proxmox host, Docker VM, TrueNAS VM, Synology NAS, and PBS Mini PC connected to the SAME switch
+- Wired Ethernet ONLY (no Wi-Fi, no powerline)
+
+**Failure Domain:**
+
+- Switch failure = **TOTAL SYSTEM OUTAGE**
+- Proxmox host failure = **TOTAL STORAGE OUTAGE**
+
+This is an **ACCEPTED and INTENTIONAL** design constraint.
+
+---
+
+### 1.3 Power Architecture (Static Design)
+
+- APC UPS
+- USB-connected to Proxmox host
+- Proxmox acts as NUT MASTER
+- Synology NAS acts as NUT SLAVE
+- TrueNAS VM is gracefully shut down by Proxmox during power events
+
+**Intended Shutdown Order (Design Intent):**
+
+1. Application VMs shut down
+2. TrueNAS VM shuts down
+3. Synology NAS shuts down
+4. Proxmox host shuts down LAST
+
+---
+
+### 1.4 Time & Identity Baseline
+
+The following systems are **REQUIRED** to support NTP:
+
+- Proxmox host
+- TrueNAS VM
+- Synology NAS
+- Docker VM
+- Proxmox Backup Server Mini PC
+
+Time synchronization is **REQUIRED** for snapshot ordering, backup timestamps, restore correctness, and authentication and TLS validity.
+
+---
+
+### 1.5 Virtualization Model
+
+**VM 101 — TrueNAS (Storage Platform)**
+
+- Runs the ZFS storage pool (RAID-Z2)
+- Owns physical HDDs via LSI SAS HBA passthrough
+- Stores all PBS backup archives for Proxmox, Debian VM, TrueNAS VM, and other VMs
+- Maintains local ZFS snapshot history
+
+**VM 102 — Docker Host**
+
+- OS: Debian 12
+- Runs: Docker, Applications (Nextcloud, Immich, Paperless), PostgreSQL, Redis
+- Container volumes hosted on dedicated NVMe partition (Samsung 990 PRO)
+- Mounts TrueNAS via NFS to provide rclone with access to PBS backup archives for cloud upload
+
+**Rules (Architectural):**
+
+- Docker NEVER runs on the Proxmox host
+- Applications NEVER run on the Synology NAS
+- TrueNAS is the authoritative backup store — all PBS archives reside there
+- The Docker VM is disposable and rebuildable
+
+---
+
+### 1.6 Storage Responsibility Matrix (Architectural Truth)
+
+| Data Type | Location | Purpose |
+|---|---|---|
+| User files | TrueNAS ZFS (RAID-Z2) | Authoritative storage |
+| Application runtime data | NVMe partition (Samsung 990 PRO) | Primary runtime state |
+| Container volumes (configs, DBs, caches) | NVMe partition (Samsung 990 PRO) | Local container runtime state |
+| Local snapshots | TrueNAS ZFS | Point-in-time rollback |
+| Backup replicas | Synology NAS | Secondary copy (daily) |
+| VM configs/backups | PBS Mini PC | Compute recovery |
+| Cloud backups | Filen (rclone crypt, via Debian VM) | Off-site disaster recovery |
+
+If application state conflicts with storage state: **TrueNAS storage reality ALWAYS WINS.**
+
+A maximum data-loss window of **24 hours** is ACCEPTED.
+
+---
+
+### 1.7 Data Transport Role (Design Contract)
+
+TrueNAS NFS is mounted on the Debian VM for rclone to read PBS backup archives and upload them to Filen Cloud. It is **NOT** in the application runtime data path.
+
+- **Primary IO path:** Applications → Docker VM → NVMe partition (Samsung 990 PRO)
+- **Backup IO path:** TrueNAS → Replication → Synology NAS (daily) + PBS backup nightly
+- **Off-site IO path:** TrueNAS (PBS archives) → NFS → Debian VM → rclone crypt → Filen Cloud
+
+---
+
+### 1.8 Cloud Role (Architectural Intent)
+
+Filen Cloud is used as the off-site backup destination.
+
+- BACKUP TARGET ONLY
+- NEVER mounted live
+- NEVER authoritative
+- Does NOT participate in runtime operation
+- Encrypted client-side before transmission via rclone crypt
+
+---
+
+### 1.9 Boot & Startup Assumptions
+
+- Proxmox must boot before storage becomes available
+- TrueNAS VM must boot before applications can operate
+- Synology NAS may normally remain powered off except during replication cycles
+- PBS Mini PC operates independently on its own schedule
+
+> **Design Consequence:** Loss of the Proxmox host temporarily removes storage access. This is an intentional and accepted risk.
+
+---
+
+### 1.10 Explicit Non-Goals
+
+This system is **NOT:**
+
+- Highly available
+- Redundant across nodes
+- Multi-site
+- Autonomous
+- Zero-RPO
+
+This system **IS:**
+
+- Deterministic
+- Recoverable
+- Auditable
+- Snapshot-protected
+- Backup-replicated (local + cloud)
+- Quiet when healthy
+- **Loud when broken**
+
+A maximum RPO of **24 hours** is an EXPLICIT DESIGN ACCEPTANCE.
+
+> **Authority Note:** This section is DESCRIPTIVE ONLY. It defines intended architecture, not permission to operate. Tier-0 integrity, enforcement, and stop conditions are defined EXCLUSIVELY in Section 2. If any conflict exists: **→ SECTION 2 WINS.**
+
+---
+
+## Section 2 — Tier-0 Platform Integrity & System Authority (ROOT)
+
+### Role of This Section (Absolute)
+
+This section defines the **minimum integrity conditions** under which the system is permitted to operate at all. This section is the **ROOT OF AUTHORITY.**
+
+- All other sections are subordinate.
+- All other documents must comply.
+- No component, service, or automation may override this section.
+
+Tier-0 integrity is binary:
+
+- **VERIFIED** → system may operate
+- **NOT VERIFIED** → system must stop
+
+If any rule in this section is violated or cannot be determined with certainty: backup outputs are untrustworthy, restore guarantees are void, `/var/run/backup_inhibit` MUST exist, and operator intervention is required.
+
+> **UNKNOWN ≠ SAFE · DEGRADED ≠ ACCEPTABLE**
+
+---
+
+### 2.1 Tier-0 Authority Hierarchy (Non-Negotiable)
+
+Tier-0 is satisfied only if **ALL** authorities below are verified. Failure or UNKNOWN state at any layer → **Tier-0 FAILED.**
+
+**1) Power Authority**
+
+The system requires a verified, current UPS power state. Tier-0 considers power FAILED if mains power status is unknown, stale, or battery-only, or if shutdown coordination cannot be guaranteed.
+
+**2) Time Authority**
+
+| Condition | State |
+|---|---|
+| NTP sync age > 15 minutes | DEGRADED |
+| Clock drift > 5 seconds | FAILED (Tier-0 FAILED) |
+| NTP unreachable > 30 minutes | FAILED (Tier-0 FAILED) |
+| Unknown or unverifiable time | FAILED (Tier-0 FAILED) |
+
+NTP Master: Proxmox host serves NTP to all VMs. All VMs **MUST** sync time FROM Proxmox, not from external NTP servers directly. Independent external sync breaks timestamp ordering across the infrastructure.
+
+All systems must be simultaneously compliant. Partial compliance is NOT acceptable. UNKNOWN time state is treated as FAILED.
+
+**3) Storage Authority**
+
+Authoritative storage = TrueNAS ZFS pool. Primary storage integrity must be provable.
+
+- Authoritative storage is ONLINE
+- Redundancy is intact (RAID-Z2 healthy)
+- No unresolved integrity errors
+- Storage state is known and current
+
+Capacity Authority (Hard Law):
+
+| Capacity | State |
+|---|---|
+| < 70% | VERIFIED |
+| 70–74% | DEGRADED |
+| 75–84% | WARNING |
+| ≥ 85% | CRITICAL (Tier-0 FAILED) |
+| Unknown | Tier-0 FAILED |
+
+**4) Data Plane Integrity**
+
+Runtime data flow is strictly defined as: `Applications → Docker VM → TrueNAS ZFS`
+
+- A single authoritative writable copy
+- No split-brain writable paths
+- No ambiguity in data ownership
+- Synology NAS is never runtime storage
+- Backup flow is one-way only
+
+**5) Tier-0 Metadata & Recoverability**
+
+- Host configuration backups
+- Backup system configuration
+- Replication definitions
+- Secrets and credentials
+- Restore procedures
+
+**6) Monitoring Truth**
+
+- External heartbeat
+- Verified alert delivery path
+
+Heartbeat exists only when Tier-0 is VERIFIED. Absence of signal = UNKNOWN = FAILED.
+
+---
+
+### 2.2 Tier-0 Enforcement Mechanism
+
+Tier-0 failure or uncertainty is represented only by: `/var/run/backup_inhibit`
+
+- Exists if Tier-0 is FAILED or UNKNOWN
+- Must be respected by all automation
+- Prevents backups and restores
+- May only be cleared by explicit operator action
+
+---
+
+### 2.3–2.8 Runtime Authority, Restore, Cloud, Taxonomy, Failure Assertion, Final Rule
+
+These sub-sections are unchanged from the baseline document. Tier-0 applies continuously. If Tier-0 transitions from VERIFIED to FAILED: backups stop, replication stops, restores are forbidden, operator intervention is required.
+
+The system must **fail closed, not degrade silently.** A maximum RPO of 24 hours is explicitly accepted. Tier-0 protects integrity, not continuity.
+
+---
+
+## Section 3 — Synology NAS (DS214+)
+
+**Role: Backup Target (Slow, Simple, Non-Authoritative)**
+
+No hardware changes to the Synology NAS. All architectural rules remain unchanged.
+
+### 3.0 Architectural Role (Locked)
+
+The Synology NAS is a **backup appliance only.** It is a passive backup target, non-authoritative, outside the runtime data plane.
+
+- NOT a compute platform
+- NOT runtime storage
+- NOT a source of data truth
+- NOT a Tier-0 authority participant
+
+Primary data authority resides on: **TrueNAS ZFS → RAID-Z2 → Local snapshots**
+
+### 3.2–3.11 Authority Boundary & Failure Consequences
+
+Unchanged from baseline. Loss of Synology NAS:
+
+- Does **NOT** affect runtime authority
+- Does **NOT** alter storage authority
+- **DOES** invalidate backup trust and RPO guarantees
+
+Data flow remains strictly one-way: `TrueNAS → Replication → Synology NAS`
+
+---
+
+## Section 4 — Proxmox Host
+
+**Role: Compute Executor & Control Plane**
+
+> ■ **HARDWARE UPDATED**
+
+- CPU: Intel Core i5-4600
+- Motherboard: GIGABYTE B760M GAMING X DDR4
+- Primary drive: Samsung 990 PRO NVMe M.2 SSD, 2TB
+  - Used as Proxmox OS boot drive and host runtime storage
+  - A dedicated partition hosts Docker VM container volumes
+- HBA: LSI SAS 9300-16i — drives passed through raw to TrueNAS VM
+
+### 4.0 Architectural Role (Locked)
+
+The Proxmox host is the control plane and compute executor. It runs the hypervisor and VMs, enforces Tier-0 authority decisions, coordinates power and shutdown sequencing, and executes monitoring and backup scheduling logic. It **does not create authority.**
+
+### 4.2 Compute Storage Role (NVMe)
+
+The Proxmox host uses the Samsung 990 PRO NVMe SSD for OS boot and as the primary application data store via a dedicated partition assigned to the Debian VM.
+
+- NVMe partition is the primary application data store (Docker container volumes)
+- Contains application runtime data — protected by nightly PBS backup to TrueNAS
+- Loss of NVMe data is recoverable via PBS restore from TrueNAS
+- A dedicated partition on the NVMe is allocated to Docker VM volume storage
+
+Authoritative data resides only on TrueNAS ZFS datasets.
+
+### 4.3–4.10 Capacity, Safety Valve, Network, Data Access, Backup, Power, Failure Consequence, Tier-0 Dependency
+
+All authority rules unchanged. The Proxmox host executes decisions; it does not decide safety. If Tier-0 is UNKNOWN or FAILED: execution must fail closed, backups and restores remain forbidden, and operator intervention is required.
+
+---
+
+## Section 5 — Docker VM
+
+**Role: Application Runtime & Data Plane**
+
+> ■ **STORAGE LAYOUT UPDATED**
+
+Docker container persistent volumes and all application runtime data are hosted on a dedicated partition of the Samsung 990 PRO NVMe SSD. TrueNAS is mounted via NFS for rclone cloud upload purposes only — it is the backup store, not the runtime data source. Large personal files (movies etc.) stored directly on TrueNAS are accessed on-demand, not at runtime.
+
+### 5.0 Architectural Role (Locked)
+
+The Docker VM is the application execution environment. It is the only location where application workloads execute, application-level services run, and runtime behavior is produced. It **implements behavior but does not grant authority.**
+
+### 5.2 Data Authority & Storage Boundary
+
+| Storage | Contents | Authority |
+|---|---|---|
+| TrueNAS ZFS | PBS backup archives, logs, large personal files | AUTHORITATIVE (backup store) |
+| NVMe Partition | Container volumes, app data, DBs, caches | PRIMARY runtime data store |
+| Synology NAS | Backup copies only | Non-authoritative |
+
+Databases derive meaning from filesystem content, not the reverse. If conflict exists: **Filesystem truth always wins.**
+
+### 5.3–5.10 Storage Segmentation, Database, Data Plane, Execution, Update, Failure, Tier-0
+
+All authority rules unchanged. The Docker VM is fully disposable and rebuildable. Rebuild must always realign to filesystem truth, not database state.
+
+The Docker VM is:
+- a runtime executor
+- a behavior engine
+- a disposable compute layer
+
+The Docker VM is NOT:
+- a storage authority
+- a safety authority
+- a recovery authority
+
+**Integrity always overrides availability.**
+
+---
+
+## Section 6 — Networking & NFS Data Plane
+
+Networking exists to protect data integrity, not to guarantee availability. Single L2 domain, wired Ethernet only. NFS is the only authorized runtime transport between applications and TrueNAS. NFS does not provide data authority.
+
+Under storage or network failure: blocking behavior is expected; stall rather than corrupt; stop rather than guess. Split-brain prevention is architectural law. All rules unchanged.
+
+Refer to the baseline document for full text of Section 6. All authority rules and contracts remain in force.
+
+---
+
+## Section 7 — Backup & Data Protection Contract
+
+Backups are a safety system, not a productivity metric. Backups are permitted only when Tier-0 is VERIFIED. Backup execution is separated from backup authority. `/var/run/backup_inhibit` is the global inhibit. A backup is considered trusted only if taken while Tier-0 was VERIFIED, completed without error, and produced complete and consistent artifacts. Backup trust does not grant restore permission. All rules unchanged.
+
+Refer to the baseline document for full text of Section 7. All authority rules and contracts remain in force.
+
+---
+
+## Section 8 — Restore & Recovery Contract
+
+Restore operations are destructive state rewrites. Restores are permitted only when Tier-0 is VERIFIED AND restore authorization has been explicitly granted. Filesystem truth must never be altered to match secondary state. Mixing restore classes without verification is forbidden. Fail-closed behavior is intentional. All rules unchanged.
+
+Refer to the baseline document for full text of Section 8. All authority rules and contracts remain in force.
+
+---
+
+## Section 9 — Monitoring & Alerting
+
+Monitoring is a safety authority amplifier, not observational. Monitoring failure is a system failure. If monitoring becomes DEGRADED, UNKNOWN, or SILENT: Tier-0 must be treated as FAILED, backup execution is forbidden, restore permission is denied. Silence must never be interpreted as stability. All rules unchanged.
+
+Refer to the baseline document for full text of Section 9. All authority rules and contracts remain in force.
+
+---
+
+## Section 10 — Recovery Decision Governance
+
+Authority is mechanical. Judgment is human. This section governs decision logic after Tier-0 is VERIFIED. Filesystem truth is re-established first, derived systems follow, runtime behavior is last. Human judgment is constrained by authority. Automation exists to stop; humans decide what happens next. All rules unchanged.
+
+Refer to the baseline document for full text of Section 10. All authority rules and contracts remain in force.
+
+---
+
+## Section 11 — Backup, Verification & Restore Implementation
+
+All scripts implement contracts from Sections 7, 9, 10. Rules: `set -euo pipefail`, abort if `backup_inhibit` exists, fail LOUD on integrity violations.
+
+Scripts:
+
+- `monitor-backups.sh` — Tier-0 evaluator, Debian VM
+- `backup-filen-rclone.sh` — rclone upload, Debian VM
+- `pbs-write-marker.sh` — PBS Mini PC
+- `check-nfs-health.sh` — NFS health, Debian VM
+- `check-nvme-health.sh` — NVMe health, Proxmox
+- `dump-databases.sh` — DB exports, Debian VM
+- `test-restore.sh` — monthly restore verification, manual
+
+Boot inhibit: `tier0-boot-inhibit.service` sets `/var/run/backup_inhibit` at every boot before cron starts. State is UNKNOWN after reboot until `monitor-backups.sh` runs and clears inhibit. This is correct fail-closed behavior.
+
+Refer to the baseline document for full text of Section 11. All authority rules and contracts remain in force.
+
+---
+
+## Section 12 — Cloud Backups & Off-Site Resilience
+
+> ■ **UPDATED:** Off-site backup provider is **Filen Cloud.** Transmission uses rclone with the rclone crypt backend, installed on the Debian VM (VM 102). rclone is NOT installed on TrueNAS. The Debian VM mounts TrueNAS via NFS to read PBS backup archives, then encrypts and uploads via rclone crypt to Filen. The NVMe application data is NOT uploaded separately — it is already captured inside the Debian VM PBS backup archive stored on TrueNAS. Cloud backup is non-authoritative and disaster-recovery only. Never mounted live. Never authoritative. The rclone crypt passphrase and Filen credentials are **Tier-0 recovery material** and must be stored in at least two independent off-system locations.
+
+Refer to the baseline document for full text of Section 12. All authority rules and contracts remain in force.
+
+---
+
+## Section 13 — Disaster Recovery Overview & Authority Boundary
+
+Orientation only. Recognized disaster classes: compute platform failure, application runtime failure, application-level corruption, primary storage incident, ransomware or mass deletion, power-related outage, partial restore or split-brain risk. Classification must occur before any recovery action. All recovery actions governed by Sections 2, 8, 10, and Operator Handbook.
+
+Refer to the baseline document for full text of Section 13. All authority rules and contracts remain in force.
+
+---
+
+## Section 14 — Operations & Human–Automation Interaction Model
+
+Automation is the default. Human intervention occurs only on explicit failure. Silence is interpreted as success. Missing authoritative signal equals failure. The system is designed to be operated safely by one person under stress. Break-glass exists for total failure scenarios only. All rules unchanged.
+
+Refer to the baseline document for full text of Section 14. All authority rules and contracts remain in force.
+
+---
+
+## Section 15 — Failure Modes & Recovery Orientation
+
+Recognized failure classes: site-wide power loss, primary storage degradation, NFS transport failure, database corruption, backup integrity failure, monitoring silence, network partition, storage exhaustion, VM or host loss, ransomware or mass deletion, human error. Classification must occur before recovery begins. Recovery is operator-led. All rules unchanged.
+
+Refer to the baseline document for full text of Section 15. All authority rules and contracts remain in force.
+
+---
+
+## Section 16 — Recovery Invariants & Data Reconciliation Law
+
+Authoritative truth: TrueNAS ZFS datasets. Reconstructable: PostgreSQL, Redis, containers, VM OSes, Proxmox host OS. Backup copies: Synology NAS, Filen Cloud.
+
+Recovery order:
+
+1. Platform safety
+2. Authoritative filesystem state
+3. Rebuild reconstructable state
+4. Reconcile applications to filesystem truth
+5. Re-establish monitoring and backup trust
+
+Reconciliation is mandatory even if no error is visible. All rules unchanged.
+
+Refer to the baseline document for full text of Section 16. All authority rules and contracts remain in force.
+
+---
+
+## Section 17 — Implementation Scripts & Gating Mechanisms
+
+**Implementation Reference · Non-Procedural · Read-Only**
+
+All scripts from the baseline document remain authoritative. This section notes only the changes arising from the hardware revision.
+
+### 17.A Hardware-Related Script Notes
+
+**`check-nvme-health.sh`**
+
+Now monitors the Samsung 990 PRO NVMe (2TB) as the primary Proxmox boot/runtime drive. The NVMe partition hosting Docker container volumes should also be included in capacity checks.
+
+**`monitor-backups.sh` — Capacity Checks**
+
+The `check_capacity` function should monitor:
+
+- `/mnt/truenas` — TrueNAS ZFS NFS mount
+- NVMe container partition — Docker VM volume store
+
+**`backup-filen-rclone.sh`**
+
+rclone installed on Docker VM ONLY (not TrueNAS, not Proxmox host). Uses rclone crypt backend — all data is encrypted client-side before leaving the Docker VM. Reads PBS backup archives from TrueNAS NFS mount only. NVMe app data is NOT a separate upload source — it is already inside the Debian VM PBS backup archive on TrueNAS.
+
+Single rclone sync: `TrueNAS NFS → filen-crypt:backups`
+
+rclone crypt passphrase is **Tier-0 recovery material.**
+
+### 17.1–17.11 All Other Scripts
+
+Unchanged. Refer to Section 17 of the baseline document for full script bodies, cron schedules, and operational notes.
+
+**Script Classification Legend:**
+
+| Label | Meaning |
+|---|---|
+| Primitive | no logic, no decisions |
+| Evaluator | determines Tier-0 state |
+| Gate | blocks unsafe execution |
+| Executor | performs work if permitted |
+| Operator-Only | manual, destructive, never automated |
+
+> If a script conflicts with an authority section: **THE SCRIPT IS WRONG.**
+
+---
+
+## Initial Deployment Checklist (Updated)
+
+> ■ Items marked [NEW] reflect the hardware revision.
+
+| Status | Task | New? |
+|---|---|---|
+| `[ ]` | Proxmox installed on Samsung 990 PRO NVMe (2TB) with static IP | ✓ NEW |
+| `[ ]` | NVMe partition created and assigned to Docker VM for container volumes | ✓ NEW |
+| `[ ]` | LSI SAS 9300-16i HBA configured; 5 drives passed through to TrueNAS VM | ✓ NEW |
+| `[ ]` | TrueNAS VM configured; ZFS RAID-Z2 pool created (~10 TB usable) | ✓ NEW |
+| `[ ]` | Synology NAS configured with static IP | |
+| `[ ]` | Docker VM (Debian 12) deployed with NVMe partition mounted | ✓ NEW |
+| `[ ]` | NFS mount from TrueNAS to Docker VM verified writable | ✓ NEW |
+| `[ ]` | All scripts from Section 17 installed | |
+| `[ ]` | Email SMTP tested | |
+| `[ ]` | Healthchecks.io configured | |
+| `[ ]` | tier0-evaluator.timer running | |
+| `[ ]` | backup_inhibit created manually at boot | |
+| `[ ]` | Full Tier-0 verification performed | |
+| `[ ]` | backup_inhibit cleared after verification | |
+| `[ ]` | Proxmox Backup Server (PBS) Mini PC configured and reachable | ✓ NEW |
+| `[ ]` | PBS nightly backup of TrueNAS VM verified | ✓ NEW |
+| `[ ]` | PBS nightly backup of Docker VM verified | ✓ NEW |
+| `[ ]` | rclone crypt remote configured on Debian VM (`filen-crypt` in `rclone.conf`) | ✓ NEW |
+| `[ ]` | Filen Cloud encryption key backed up off-site (Tier-0 material) | ✓ NEW |
+| `[ ]` | First backup completed successfully | |
+| `[ ]` | Monthly restore test passed | |
+| `[ ]` | Emergency runbook printed | |
+| `[ ]` | `rclone.conf` backed up off-site — contains Filen credentials AND crypt passphrase (Tier-0 material) | |
+
+---
+
+*End of Document — Homelab-AB (Hardware Revision)*
+
+*All authority rules, Tier-0 contracts, and architectural invariants from the baseline document remain in full force. This revision updates only the physical hardware layout, storage mapping, backup transmission method, and deployment checklist.*
