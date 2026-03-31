@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Homelab Nightly Backup Timeline</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0f1117;
+    color: #e2e8f0;
+    font-family: 'Courier New', monospace;
+    padding: 32px 24px 48px;
+    min-width: 900px;
+  }
+
+  h1 {
+    font-family: Georgia, serif;
+    font-size: 22px;
+    font-weight: 400;
+    color: #f8fafc;
+    margin-bottom: 6px;
+    letter-spacing: 0.02em;
+  }
+
+  .subtitle {
+    font-size: 12px;
+    color: #64748b;
+    margin-bottom: 28px;
+    letter-spacing: 0.05em;
+  }
+
+  /* ── TIME AXIS ── */
+  .axis-wrap {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    margin-bottom: 4px;
+  }
+  .axis {
+    display: flex;
+    justify-content: space-between;
+    border-bottom: 1px solid #334155;
+    padding-bottom: 6px;
+    margin-bottom: 2px;
+    position: relative;
+  }
+  .tick {
+    font-size: 11px;
+    color: #475569;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    flex: 1;
+    text-align: center;
+  }
+  .tick:first-child { text-align: left; }
+  .tick:last-child  { text-align: right; }
+
+  /* ── ROWS ── */
+  .row {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    min-height: 52px;
+    border-bottom: 1px solid #1e293b;
+    align-items: center;
+  }
+  .row:last-child { border-bottom: none; }
+
+  .row-label {
+    padding-right: 12px;
+    text-align: right;
+  }
+  .row-host {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .row-time {
+    font-size: 10px;
+    color: #475569;
+    margin-top: 2px;
+  }
+
+  .row-track {
+    position: relative;
+    height: 52px;
+  }
+
+  /* ── BARS ── */
+  .bar {
+    position: absolute;
+    height: 26px;
+    top: 13px;
+    border-radius: 5px;
+    display: flex;
+    align-items: center;
+    padding: 0 8px;
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+    letter-spacing: 0.03em;
+  }
+
+  .bar-purple  { background: #4c1d95; border: 1px solid #7c3aed; color: #c4b5fd; }
+  .bar-teal    { background: #042f2e; border: 1px solid #0f766e; color: #5eead4; }
+  .bar-coral   { background: #431407; border: 1px solid #c2410c; color: #fdba74; }
+  .bar-amber   { background: #451a03; border: 1px solid #b45309; color: #fcd34d; }
+  .bar-blue    { background: #0c1d42; border: 1px solid #1d4ed8; color: #93c5fd; }
+  .bar-gray    { background: #1e293b; border: 1px solid #475569; color: #94a3b8; }
+  .bar-green   { background: #052e16; border: 1px solid #15803d; color: #86efac; }
+
+  .bar-dashed  { background: transparent; border-style: dashed; border-width: 1px; }
+  .bar-dashed.bar-coral  { border-color: #c2410c; color: #fb923c; }
+  .bar-dashed.bar-teal   { border-color: #0f766e; color: #2dd4bf; }
+
+  .dot {
+    position: absolute;
+    width: 20px;
+    height: 26px;
+    top: 13px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+  }
+
+  /* ── ANNOTATION BELOW BAR ── */
+  .note {
+    position: absolute;
+    top: 40px;
+    font-size: 10px;
+    color: #64748b;
+    white-space: nowrap;
+  }
+  .note-warn { color: #d97706; }
+  .note-danger { color: #dc2626; }
+  .note-green { color: #22c55e; }
+
+  /* ── TRIGGER ARROW COLUMN ── */
+  .trigger-row {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    min-height: 48px;
+    background: #0a1628;
+    border-bottom: 1px solid #1e293b;
+    border-top: 1px solid #1e293b;
+  }
+  .trigger-track {
+    position: relative;
+    display: flex;
+    align-items: center;
+    padding: 0 0 0 0;
+    font-size: 11px;
+    color: #22c55e;
+    font-style: italic;
+  }
+  .trigger-label {
+    font-size: 10px;
+    color: #22c55e;
+    padding: 6px 12px;
+    text-align: right;
+    font-style: italic;
+  }
+
+  /* ── SECTION DIVIDERS ── */
+  .section-break {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    height: 6px;
+    background: #1e293b;
+    border-top: 1px solid #334155;
+    border-bottom: 1px solid #334155;
+    margin: 2px 0;
+  }
+
+  /* ── LEGEND ── */
+  .legend {
+    margin-top: 24px;
+    display: flex;
+    gap: 20px;
+    align-items: center;
+    flex-wrap: wrap;
+    padding: 12px 16px;
+    background: #1e293b;
+    border-radius: 8px;
+    border: 1px solid #334155;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 11px;
+    color: #94a3b8;
+  }
+  .legend-dot {
+    width: 12px; height: 12px;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+
+  /* ── ISSUES BOX ── */
+  .issues {
+    margin-top: 24px;
+    padding: 16px 20px;
+    background: #1a0f0f;
+    border: 1px solid #7f1d1d;
+    border-radius: 8px;
+  }
+  .issues h2 {
+    font-size: 12px;
+    font-weight: 700;
+    color: #f87171;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+  .issue {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 8px;
+    font-size: 11px;
+    line-height: 1.6;
+    color: #fca5a5;
+  }
+  .issue-num {
+    color: #ef4444;
+    font-weight: 700;
+    flex-shrink: 0;
+    width: 18px;
+  }
+  .issue-body { color: #fca5a5; }
+  .issue-body strong { color: #fcd34d; font-weight: 700; }
+
+  /* position helper: % of (07:00 - 00:00) = 420 min span */
+  /* left% = (minutes_from_midnight / 420) * 100 */
+  /* width% = (duration_minutes / 420) * 100 */
+</style>
+</head>
+<body>
+
+<h1>Homelab — Nightly Backup Sequence</h1>
+<p class="subtitle">ONE ROW PER PROCESS · rclone starts when PBS finishes, not at a fixed time</p>
+
+<!-- TIME AXIS -->
+<div class="axis-wrap">
+  <div></div>
+  <div class="axis">
+    <span class="tick">00:00</span>
+    <span class="tick">01:00</span>
+    <span class="tick">02:00</span>
+    <span class="tick">03:00</span>
+    <span class="tick">04:00</span>
+    <span class="tick">05:00</span>
+    <span class="tick">06:00</span>
+    <span class="tick">07:00</span>
+  </div>
+</div>
+
+<!-- helper macro via style: left = minutes/420*100%, width = dur/420*100% -->
+
+<!-- ── R1: Shipyard · reset inhibit · 00:00 ── -->
+<div class="row">
+  <div class="row-label">
+    <div class="row-host" style="color:#5eead4">Shipyard</div>
+    <div class="row-time">00:00</div>
+  </div>
+  <div class="row-track">
+    <!-- 00:00 = 0%, w=2min=0.5% -->
+    <div class="bar bar-gray" style="left:0%;width:1.4%">reset</div>
+    <div class="note" style="left:2%">rm -f /var/run/proxmox_shutdown_done — clears previous night's sentinel</div>
+  </div>
+</div>
+
+<!-- ── R2: Shipyard · wake-proxmox.sh · 00:25 ── -->
+<div class="row">
+  <div class="row-label">
+    <div class="row-host" style="color:#5eead4">Shipyard</div>
+    <div class="row-time">00:25</div>
+  </div>
+  <div class="row-track">
+    <!-- 00:25 = 25/420=5.95%, w=2.5min=0.6% -->
+    <div class="bar bar-purple" style="left:5.95%;width:6%">wake-proxmox.sh</div>
+    <div class="note" style="left:13%">WOL magic packet → 00:e0:4c:05:30:3f &nbsp;·&nbsp; polls ping 30×5s &nbsp;·&nbsp; sets inhibit + emails on failure</div>
+  </div>
+</div>
+
+<!-- ── R3: Shipyard · collect-all-configs · 00:27 ── -->
+<div class="row">
+  <div class="row-label">
+    <div class="row-host" style="color:#5eead4">Shipyard</div>
+    <div class="row-time">00:27</div>
+  </div>
+  <div class="row-track">
+    <!-- 00:27=6.4%, w~5min=1.2% -->
+    <div class="bar bar-teal" style="left:6.4%;width:2%">cfg</div>
+    <div class="note" style="left:9.5%">collect-all-configs.sh — daily snapshot of all node configs → TrueNAS</div>
+  </div>
+</div>
+
+<div class="section-break"></div>
+
+<!-- ── R4: mini PC · boot ── -->
+<div class="row">
+  <div class="row-label">
+    <div class="row-host" style="color:#c4b5fd">mini PC</div>
+    <div class="row-time">~00:28</div>
+  </div>
+  <div class="row-track">
+    <!-- boot 00:28=6.7%, w=3min -->
+    <div class="bar bar-purple" style="left:6.7%;width:2.5%">boot</div>
+    <!-- alive line: 9.2%..116% nah cap at shutdown ~05:15=75% -->
+    <div style="position:absolute;left:9.2%;width:65.8%;top:25px;height:1px;border-top:1px dashed #4c1d95;"></div>
+    <!-- shutdown ~05:00=75min past 04h, 300min=71.4% -->
+    <div class="bar bar-purple" style="left:71%;width:8%">shutdown</div>
+    <div class="note" style="left:9.5%">Proxmox starts · PBS VM Drydock (.142) auto-starts · NFS mounts to TrueNAS established</div>
+    <div class="note" style="left:70%">after PBS done</div>
+  </div>
+</div>
+
+<div class="section-break"></div>
+
+<!-- ── R5: PBS VM · backup job ── -->
+<div class="row" style="min-height:60px">
+  <div class="row-label">
+    <div class="row-host" style="color:#fdba74">PBS VM</div>
+    <div class="row-time">~00:30</div>
+  </div>
+  <div class="row-track" style="height:60px">
+    <!-- solid 00:30=7.1% to 02:30=150min=35.7% → w=28.6% -->
+    <div class="bar bar-coral" style="left:7.1%;width:28.6%;top:10px">PBS backup job — VMs 101, 102, 100</div>
+    <!-- dashed 02:30=35.7% to 04:30=270min=64.3% → w=28.6% -->
+    <div class="bar bar-dashed bar-coral" style="left:35.7%;width:28.6%;top:10px;justify-content:center">— — — —  (heavy night)</div>
+    <div class="note" style="left:7.1%;top:38px">starts ~00:30 · writes chunks to TrueNAS NFS · also local-staging NVMe</div>
+    <!-- range labels -->
+    <div style="position:absolute;left:28%;top:2px;font-size:9px;color:#64748b;">light (~2.5h) ←</div>
+    <div style="position:absolute;left:52%;top:2px;font-size:9px;color:#64748b;">→ heavy (~4.5h)</div>
+  </div>
+</div>
+
+<!-- ── R6: TrueNAS · NFS receives ── -->
+<div class="row">
+  <div class="row-label">
+    <div class="row-host" style="color:#fcd34d">TrueNAS</div>
+    <div class="row-time">~00:30</div>
+  </div>
+  <div class="row-track">
+    <!-- same window as PBS backup: 7.1% to 64.3% → w=57.2% -->
+    <div class="bar bar-amber" style="left:7.1%;width:57.2%">receiving NFS writes → ZFS pool &nbsp;tank/backups/proxmox-backups</div>
+    <div class="note" style="left:7.1%">active for the full duration of the PBS backup job</div>
+  </div>
+</div>
+
+<!-- ── R7: PBS VM · marker written (event) ── -->
+<div class="row">
+  <div class="row-label">
+    <div class="row-host" style="color:#fdba74">PBS VM</div>
+    <div class="row-time">variable</div>
+  </div>
+  <div class="row-track">
+    <!-- marker range: light=35.7% heavy=64.3%, show bracket -->
+    <div style="position:absolute;left:35.7%;width:28.6%;top:13px;height:1px;border-top:1px dashed #22c55e;"></div>
+    <div style="position:absolute;left:35.7%;top:10px;width:2px;height:20px;background:#22c55e;border-radius:1px;"></div>
+    <div class="dot bar-green" style="left:34.5%;font-size:8px;">✓</div>
+    <div class="note note-green" style="left:40%;top:10px">pbs-write-marker.sh — writes .pbs-last-success.txt atomically to TrueNAS NFS</div>
+    <div class="note" style="left:40%;top:24px">triggered by post-backup hook (JOB_STATE=ok) · atomic tmp→mv write</div>
+  </div>
+</div>
+
+<!-- ── TRIGGER ARROW ROW ── -->
+<div class="trigger-row">
+  <div class="trigger-label">⬇ trigger</div>
+  <div class="trigger-track">
+    <!-- arrow at ~35.7% -->
+    <div style="position:absolute;left:35.7%;top:0;width:2px;height:100%;background:linear-gradient(#22c55e,#16a34a);"></div>
+    <div style="position:absolute;left:calc(35.7% - 5px);top:50%;font-size:14px;color:#22c55e;">▼</div>
+    <div style="position:absolute;left:calc(35.7% + 8px);top:8px;font-size:10px;color:#22c55e;font-style:italic;">
+      Shipyard poll detects marker within 60s → rclone proceeds immediately
+    </div>
+  </div>
+</div>
+
+<div class="section-break"></div>
+
+<!-- ── R8: Shipyard · dump-databases.sh · 01:00 ── -->
+<div class="row" style="min-height:62px">
+  <div class="row-label">
+    <div class="row-host" style="color:#5eead4">Shipyard</div>
+    <div class="row-time">01:00</div>
+  </div>
+  <div class="row-track" style="height:62px">
+    <!-- 01:00=23.8%, w=10min=2.4% -->
+    <div class="bar bar-teal" style="left:23.8%;width:2.4%;top:8px">DB</div>
+    <!-- flock warning border -->
+    <div style="position:absolute;left:23.4%;width:3.2%;top:6px;height:30px;border:1.5px solid #d97706;border-radius:5px;pointer-events:none;"></div>
+    <div class="note" style="left:27.5%;top:8px;font-size:11px;color:#e2e8f0;font-weight:600;">dump-databases.sh &nbsp;(~10 min)</div>
+    <div class="note note-warn" style="left:27.5%;top:24px;">⚠ holds DB_DUMP flock — rclone checks this before uploading</div>
+    <div class="note" style="left:23.8%;top:42px;">Postgres (paperless + immich) &nbsp;·&nbsp; Redis RDB &nbsp;·&nbsp; Paperless document export &nbsp;→&nbsp; /mnt/truenas/db-dumps</div>
+  </div>
+</div>
+
+<!-- ── R9: Shipyard · rclone polling ── -->
+<div class="row" style="min-height:62px">
+  <div class="row-label">
+    <div class="row-host" style="color:#5eead4">Shipyard</div>
+    <div class="row-time">01:10</div>
+  </div>
+  <div class="row-track" style="height:62px">
+    <!-- 01:10=26.2%, polls until marker ~35.7%, w=9.5% -->
+    <div class="bar bar-dashed bar-teal" style="left:26.2%;width:9.5%;top:8px;justify-content:center;">polling every 60s…</div>
+    <!-- 2h max: 01:10+120min=03:10=190/420=45.2% -->
+    <div style="position:absolute;left:45.2%;top:4px;width:1.5px;height:36px;background:#dc2626;opacity:0.8;"></div>
+    <div class="note note-danger" style="left:45.5%;top:5px;">2h limit</div>
+    <div class="note note-danger" style="left:45.5%;top:19px;">(fails if no marker)</div>
+    <div class="note" style="left:26.2%;top:42px;">backup-filen-rclone.sh starts · deletes stale Filen marker · checks DB_DUMP flock · waits for PBS marker</div>
+  </div>
+</div>
+
+<!-- ── R10: Shipyard · rclone DB sync ── -->
+<div class="row" style="min-height:62px">
+  <div class="row-label">
+    <div class="row-host" style="color:#5eead4">Shipyard</div>
+    <div class="row-time">on marker</div>
+  </div>
+  <div class="row-track" style="height:62px">
+    <!-- starts at marker 35.7%, w=5min=1.2% -->
+    <div class="bar bar-teal" style="left:35.7%;width:4%;top:8px">DB sync</div>
+    <div class="note" style="left:40.5%;top:8px;font-size:11px;color:#e2e8f0;">rclone sync &nbsp; db-dumps → filen-crypt:backups/db-dumps &nbsp;(+ verify)</div>
+    <div class="note" style="left:35.7%;top:42px;">pre-flight: ping TrueNAS · NFS mounts · stale-handle probe · Docker health · rclone auth check</div>
+  </div>
+</div>
+
+<!-- ── R11: Shipyard · rclone PBS copy ── -->
+<div class="row" style="min-height:62px">
+  <div class="row-label">
+    <div class="row-host" style="color:#5eead4">Shipyard</div>
+    <div class="row-time">after DB sync</div>
+  </div>
+  <div class="row-track" style="height:62px">
+    <!-- starts ~39.7%, runs to 100% (up to 8h but visualise to end) -->
+    <div class="bar bar-teal" style="left:39.7%;width:60.3%;top:8px">rclone copy &nbsp; PBS dataset → filen-crypt:backups &nbsp;(up to 8h · 3 retries)</div>
+    <div class="note" style="left:39.7%;top:42px;">additive only — never deletes &nbsp;·&nbsp; chunk count checks A+B &nbsp;·&nbsp; writes Filen success marker on completion</div>
+  </div>
+</div>
+
+<div class="section-break"></div>
+
+<!-- ── R12: PBS VM · prune ── -->
+<div class="row">
+  <div class="row-label">
+    <div class="row-host" style="color:#fdba74">PBS VM</div>
+    <div class="row-time">after backup</div>
+  </div>
+  <div class="row-track">
+    <!-- starts at marker ~35.7%, w=10min=2.4% -->
+    <div class="bar bar-coral" style="left:35.7%;width:5%">prune</div>
+    <div class="note" style="left:41.5%">truenas-backups: last 7 · daily 7 · weekly 4 · monthly 6 · yearly 1 &nbsp;·&nbsp; local-staging: last 3</div>
+  </div>
+</div>
+
+<!-- ── R13: PBS VM · GC ── -->
+<div class="row">
+  <div class="row-label">
+    <div class="row-host" style="color:#fdba74">PBS VM</div>
+    <div class="row-time">after prune</div>
+  </div>
+  <div class="row-track">
+    <!-- starts ~40.7%, w=15min=3.6% -->
+    <div class="bar bar-coral" style="left:40.7%;width:4%">GC</div>
+    <div class="note" style="left:45.5%">garbage-collect unreferenced chunks &nbsp;(gc-schedule daily)</div>
+  </div>
+</div>
+
+<div class="section-break"></div>
+
+<!-- ── R14: Proxmox main · ZFS scrub · 02:00 (1st) ── -->
+<div class="row">
+  <div class="row-label">
+    <div class="row-host" style="color:#93c5fd">Proxmox</div>
+    <div class="row-time">02:00 (1st)</div>
+  </div>
+  <div class="row-track">
+    <!-- 02:00=47.6%, w=3min -->
+    <div class="dot bar-blue" style="left:47.4%;width:1.5%;font-size:9px;">▐</div>
+    <div class="note" style="left:49.5%">ZFS scrub on rpool &nbsp;·&nbsp; monthly (1st of month only) &nbsp;·&nbsp; different host — no conflict</div>
+  </div>
+</div>
+
+<!-- ── R15: Proxmox main · audit-proxmox.sh · 02:28 ── -->
+<div class="row">
+  <div class="row-label">
+    <div class="row-host" style="color:#93c5fd">Proxmox</div>
+    <div class="row-time">02:28</div>
+  </div>
+  <div class="row-track">
+    <!-- 02:28=55.2%, w=3min -->
+    <div class="dot bar-blue" style="left:55%;width:1.5%;font-size:9px;">▐</div>
+    <div class="note" style="left:57%">audit-proxmox.sh — pings PBS (.142) &nbsp;·&nbsp; PBS is mid-backup at this time, health check only, not a blocker</div>
+  </div>
+</div>
+
+<div class="section-break"></div>
+
+<!-- ── R16: Shipyard · daily report · 07:00 ── -->
+<div class="row">
+  <div class="row-label">
+    <div class="row-host" style="color:#5eead4">Shipyard</div>
+    <div class="row-time">07:00</div>
+  </div>
+  <div class="row-track">
+    <!-- 07:00=100% → right edge, dot -->
+    <div class="bar bar-teal" style="left:91%;width:9%">daily report</div>
+    <div class="note" style="left:0%">homelab-daily-report.sh — reads PBS marker · Filen marker · UPS · ZFS · queued failures → morning summary email</div>
+  </div>
+</div>
+
+<!-- LEGEND -->
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#4c1d95;border:1px solid #7c3aed;"></div>mini PC</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#431407;border:1px solid #c2410c;"></div>PBS VM</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#042f2e;border:1px solid #0f766e;"></div>Shipyard (Debian VM)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#451a03;border:1px solid #b45309;"></div>TrueNAS</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#0c1d42;border:1px solid #1d4ed8;"></div>Proxmox main</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#052e16;border:1px solid #15803d;"></div>trigger event</div>
+  <div class="legend-item" style="color:#d97706;">⚠ flock held</div>
+  <div class="legend-item" style="color:#dc2626;">| deadline</div>
+  <div class="legend-item" style="color:#22c55e;">▼ trigger dependency</div>
+</div>
+
+
+</body>
+</html>
